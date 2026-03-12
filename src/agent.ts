@@ -61,11 +61,23 @@ export class AgentRunner {
     trainingSummary: string;
     experimentHistory: string;
   }): Promise<string> {
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["policy_markdown"],
+      properties: {
+        policy_markdown: {
+          type: "string",
+          minLength: 1,
+        },
+      },
+    };
+
     const prompt = [
       "You are revising one Markdown forecasting policy for a fixed evaluation harness.",
       "You may revise only the policy text itself.",
       "Do not propose code, tooling, or harness changes.",
-      "Return only the full replacement Markdown for policy/current.md.",
+      "Return strict JSON matching the schema and nothing else.",
       "",
       "Current policy:",
       args.currentPolicy,
@@ -79,8 +91,8 @@ export class AgentRunner {
       "Keep the policy legible. Prefer calibration and simplicity over bold complexity.",
     ].join("\n");
 
-    const reply = await this.runText(prompt, this.config.agentRevisionModel);
-    return stripMarkdownFences(reply).trim();
+    const raw = await this.runStructured(prompt, schema, this.config.agentRevisionModel);
+    return parsePolicyRevision(raw);
   }
 
   private async runStructured(
@@ -154,6 +166,7 @@ async function runCodexStructured(
     await fs.writeFile(schemaPath, JSON.stringify(args.schema), "utf8");
     const commandArgs = [
       "exec",
+      "--json",
       "--sandbox",
       "read-only",
       "--skip-git-repo-check",
@@ -179,7 +192,11 @@ async function runCodexStructured(
       throw new Error(`codex exec failed: ${result.stderr || result.stdout}`);
     }
 
-    return (await fs.readFile(outputPath, "utf8")).trim();
+    return await readCodexOutput({
+      outputPath,
+      stdout: result.stdout,
+      responseType: "structured",
+    });
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -192,6 +209,7 @@ async function runCodexText(args: AgentRunArgs): Promise<string> {
   try {
     const commandArgs = [
       "exec",
+      "--json",
       "--sandbox",
       "read-only",
       "--skip-git-repo-check",
@@ -215,7 +233,11 @@ async function runCodexText(args: AgentRunArgs): Promise<string> {
       throw new Error(`codex exec failed: ${result.stderr || result.stdout}`);
     }
 
-    return (await fs.readFile(outputPath, "utf8")).trim();
+    return await readCodexOutput({
+      outputPath,
+      stdout: result.stdout,
+      responseType: "text",
+    });
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -274,13 +296,7 @@ async function runClaudeText(args: AgentRunArgs): Promise<string> {
 }
 
 export function parseForecastOutput(raw: string): ForecastOutput {
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`Forecast response was not valid JSON: ${(error as Error).message}`);
-  }
+  const parsed = parseJsonObjectPayload(raw, "Forecast response");
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Forecast response must be a JSON object");
@@ -301,6 +317,84 @@ export function parseForecastOutput(raw: string): ForecastOutput {
     probability: clampProbability(probability),
     rationale: truncate(rationale.trim(), 240),
   };
+}
+
+export function parsePolicyRevision(raw: string): string {
+  const parsed = parseJsonObjectPayload(raw, "Policy revision response");
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Policy revision response must be a JSON object");
+  }
+
+  const policyMarkdown = (parsed as { policy_markdown?: unknown }).policy_markdown;
+  if (typeof policyMarkdown !== "string" || policyMarkdown.trim().length === 0) {
+    throw new Error("Policy revision response must include a non-empty policy_markdown");
+  }
+
+  return stripMarkdownFences(policyMarkdown).trim();
+}
+
+function parseJsonObjectPayload(raw: string, label: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    const extracted = extractFirstJsonObject(raw);
+    if (extracted) {
+      try {
+        return JSON.parse(extracted);
+      } catch {
+        // fall through to the original error below
+      }
+    }
+
+    throw new Error(`${label} was not valid JSON: ${(error as Error).message}`);
+  }
+}
+
+function extractFirstJsonObject(raw: string): string | null {
+  const start = raw.indexOf("{");
+  if (start === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
+
+  for (let index = start; index < raw.length; index += 1) {
+    const char = raw[index];
+
+    if (inString) {
+      if (escaping) {
+        escaping = false;
+      } else if (char === "\\") {
+        escaping = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return raw.slice(start, index + 1);
+      }
+    }
+  }
+
+  return null;
 }
 
 function stripMarkdownFences(text: string): string {
@@ -331,6 +425,73 @@ function resolveAgentCli(preferred: AppConfig["agentCli"]): AgentCli {
 function commandExists(command: string): boolean {
   const result = spawnSync("which", [command], { stdio: "ignore" });
   return result.status === 0;
+}
+
+async function readCodexOutput(args: {
+  outputPath: string;
+  stdout: string;
+  responseType: "structured" | "text";
+}): Promise<string> {
+  const fileContents = await readOptionalFile(args.outputPath);
+  const normalizedFile = fileContents?.trim() ?? "";
+  if (normalizedFile.length > 0) {
+    return normalizedFile;
+  }
+
+  const stdoutMessage = parseCodexJsonEventStream(args.stdout);
+  if (stdoutMessage) {
+    return stdoutMessage;
+  }
+
+  const normalizedStdout = args.stdout.trim();
+  if (normalizedStdout.length > 0) {
+    return normalizedStdout;
+  }
+
+  throw new Error(`codex exec returned success but no ${args.responseType} output was captured`);
+}
+
+async function readOptionalFile(filePath: string): Promise<string | null> {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function parseCodexJsonEventStream(stdout: string): string | null {
+  let latestMessage: string | null = null;
+
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+
+    try {
+      const event = JSON.parse(trimmed) as {
+        type?: string;
+        item?: { type?: string; text?: string };
+      };
+
+      if (
+        event.type === "item.completed" &&
+        event.item?.type === "agent_message" &&
+        typeof event.item.text === "string" &&
+        event.item.text.trim().length > 0
+      ) {
+        latestMessage = event.item.text.trim();
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return latestMessage;
 }
 
 async function runCommand(command: string, args: string[], options: RunOptions): Promise<CommandResult> {
@@ -384,4 +545,3 @@ async function runCommand(command: string, args: string[], options: RunOptions):
     child.stdin.end();
   });
 }
-

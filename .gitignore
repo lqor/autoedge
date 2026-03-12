@@ -5,3 +5,4 @@ dist/
 .env.*
 coverage/
 artifacts/cache/*.tmp
+artifacts/cache/*.json

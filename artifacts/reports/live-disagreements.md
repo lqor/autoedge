@@ -1,6 +1,6 @@
 # Live Disagreements
 
-Active policy: `779199b47d3e35165fd5a6e981b2403372fb9dd419b5816f2501d31637a53442`
+Active policy: `618a13470473a802f02f550c09d9642861a999c2240c0577207e33bc92dd5ca4`
 Minimum absolute disagreement: 10.0%
 Top N: 20
 

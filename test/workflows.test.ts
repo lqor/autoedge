@@ -271,6 +271,70 @@ describe("workflows", () => {
     expect(manifest?.assignments["new-2"]).toBeDefined();
     expect(manifest?.assignments["old-1"]).toBeUndefined();
   });
+
+  it("records a rejected no-op candidate when policy revision fails", async () => {
+    const config = loadConfig(rootDir);
+    await ensureProjectLayout(config);
+    await writeActivePolicy(config, "# Baseline policy\n\nStay close to market.");
+
+    const examples: ResolvedExample[] = [
+      buildResolvedExample({
+        marketId: "train-1",
+        ticker: "TRAIN1",
+        title: "Train market one",
+        marketProbability: 0.35,
+        outcome: 1,
+        settlementTime: "2026-01-01T00:00:00.000Z",
+      }),
+      buildResolvedExample({
+        marketId: "holdout-1",
+        ticker: "HOLD1",
+        title: "Holdout market",
+        marketProbability: 0.55,
+        outcome: 1,
+        settlementTime: "2026-02-01T00:00:00.000Z",
+      }),
+    ];
+
+    await writeResolvedExamples(config, examples);
+    await writeSplitManifest(config, {
+      createdAt: new Date().toISOString(),
+      assignments: {
+        "train-1": "train",
+        "holdout-1": "holdout",
+      },
+    });
+
+    const deps: AppDeps = {
+      kalshi: {
+        async getHistoricalCutoff() {
+          return null;
+        },
+        async fetchOpenSnapshots() {
+          return [];
+        },
+        async fetchResolvedExamples() {
+          return examples;
+        },
+      },
+      agent: {
+        async forecast() {
+          return { probability: 0.55, rationale: "mirror market" };
+        },
+        async revisePolicy() {
+          throw new Error("malformed agent revision");
+        },
+      },
+    };
+
+    const result = await runImprove(config, deps);
+    const runs = await readExperimentRuns(config);
+
+    expect(result.run.promoted).toBe(false);
+    expect(result.run.candidatePolicyHash).toBe(result.run.parentPolicyHash);
+    expect(result.run.notes).toContain("Revision fallback");
+    expect(runs).toHaveLength(1);
+  });
 });
 
 function buildResolvedExample(args: {

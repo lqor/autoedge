@@ -151,26 +151,36 @@ export async function runImprove(
   });
 
   const existingRuns = await readExperimentRuns(config);
-  const candidatePolicy = await deps.agent.revisePolicy({
-    currentPolicy,
-    trainingSummary: formatTrainingSummary(trainSummary),
-    experimentHistory: summarizeExperimentRuns(existingRuns),
-  });
+  let candidatePolicy = currentPolicy;
+  let revisionError: string | null = null;
+
+  try {
+    candidatePolicy = await deps.agent.revisePolicy({
+      currentPolicy,
+      trainingSummary: formatTrainingSummary(trainSummary),
+      experimentHistory: summarizeExperimentRuns(existingRuns),
+    });
+  } catch (error) {
+    revisionError = error instanceof Error ? error.message : String(error);
+  }
 
   const candidateVersion = await archivePolicy(config, candidatePolicy, {
     parentHash: currentHash,
     sourceRunId: runId,
   });
 
-  const candidateHoldout = await evaluateExamples({
-    config,
-    deps,
-    policyContent: candidatePolicy,
-    policyHash: candidateVersion.hash,
-    runId,
-    examples: holdoutExamples,
-    split: "holdout",
-  });
+  const candidateHoldout =
+    candidateVersion.hash === currentHash
+      ? currentHoldout
+      : await evaluateExamples({
+          config,
+          deps,
+          policyContent: candidatePolicy,
+          policyHash: candidateVersion.hash,
+          runId,
+          examples: holdoutExamples,
+          split: "holdout",
+        });
 
   const deltaVsParent = roundToSix(candidateHoldout.policyLogLoss - currentHoldout.policyLogLoss);
   const promoted = deltaVsParent < 0;
@@ -200,7 +210,12 @@ export async function runImprove(
     sampleCount: candidateHoldout.sampleCount,
     candidatePath: candidateVersion.filePath,
     model: config.agentRevisionModel ?? config.agentForecastModel ?? "default",
-    notes: `Current holdout before candidate: ${currentHoldout.policyLogLoss.toFixed(6)}`,
+    notes: [
+      `Current holdout before candidate: ${currentHoldout.policyLogLoss.toFixed(6)}`,
+      revisionError ? `Revision fallback: ${truncate(revisionError, 240)}` : null,
+    ]
+      .filter(Boolean)
+      .join(" | "),
   };
 
   await appendExperimentRun(config, run);
