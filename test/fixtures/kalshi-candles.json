@@ -1,0 +1,17 @@
+[
+  {
+    "end_period_ts": "2026-03-13T15:00:00Z",
+    "close": 39,
+    "volume": 120
+  },
+  {
+    "end_period_ts": "2026-03-14T15:00:00Z",
+    "close": 44,
+    "volume": 180
+  },
+  {
+    "end_period_ts": "2026-03-14T16:00:00Z",
+    "close": 46,
+    "volume": 210
+  }
+]

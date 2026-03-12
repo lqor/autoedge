@@ -1,0 +1,20 @@
+{
+  "id": "12345",
+  "ticker": "KXBTC-TEST",
+  "series_ticker": "KXBTC",
+  "title": "Will BTC settle above 100k by Friday?",
+  "rules_primary": "Resolves YES if the published close is above 100000.",
+  "category": "crypto",
+  "status": "open",
+  "yes_bid": 41,
+  "yes_ask": 43,
+  "no_bid": 57,
+  "no_ask": 59,
+  "last_price": 42,
+  "volume": 1200,
+  "liquidity": 35000,
+  "open_interest": 900,
+  "close_time": "2026-03-15T16:00:00Z",
+  "settlement_time": "2026-03-15T16:05:00Z",
+  "result": ""
+}

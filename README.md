@@ -12,83 +12,132 @@
 
 ---
 
-## What It Does
+## Thesis
 
-`autoedge` treats forecasting like a closed-loop system:
+`autoedge` applies the autoresearch pattern to prediction markets.
 
-- It keeps its reasoning concentrated in a single policy file.
-- It rewrites that policy as new evidence comes in.
-- It scores those changes against resolved Kalshi markets.
-- It ships the current edge by surfacing where its forecast diverges from the market.
+The repo is not a trading bot. It does not place orders, manage capital, or optimize for short-term PnL. It is a forecasting research harness with one changing surface: [`policy/current.md`](./policy/current.md).
 
-That makes the engine legible, testable, and forced to improve against reality instead of vibes.
+Everything else stays fixed:
+
+- Kalshi ingestion and normalization
+- 24-hour historical snapshot selection
+- chronological train/holdout split
+- log-loss scoring
+- experiment ledgers and reports
+- live disagreement publishing
+
+That is the point. The policy is forced to improve its judgment inside a frozen evaluator.
 
 ## The Loop
 
 ```mermaid
 flowchart LR
-    A["Policy File<br/>One editable source of forecasting behavior"] --> B["Generate Forecasts<br/>Apply the current policy to markets"]
-    B --> C["Backtest on Resolved Kalshi Markets<br/>Score calibration, sharpness, and edge"]
-    C --> D["Rewrite Policy<br/>Keep what improves, cut what does not"]
-    D --> E["Publish Live Disagreements<br/>Show where the engine and market diverge"]
-    E --> A
+    A["policy/current.md<br/>The only mutable artifact"] --> B["Forecast historical examples<br/>One probability per market"]
+    B --> C["Score on resolved outcomes<br/>Holdout average log loss decides"]
+    C --> D["Agent proposes revised policy<br/>Codex or Claude CLI"]
+    D --> E["Promote or reject<br/>Only if holdout improves"]
+    E --> F["Scan live open markets<br/>Publish strongest disagreements"]
+    F --> A
 ```
 
-## Why The Design Is Different
+## Why It Is Small
 
-| Conventional setup | autoedge |
-| --- | --- |
-| Logic scattered across prompts, scripts, and operator intuition | One policy file acts as the system of record |
-| Improvement is anecdotal | Improvement is measured on resolved markets |
-| Live calls are hard to audit | Disagreements with the market are explicit and inspectable |
-| Research and deployment drift apart | Backtesting and publishing sit inside the same loop |
+The visual heart of the repo is the experiment history.
 
-## Core Principles
+Every run produces:
 
-### 1. One File Matters
-The engine does not hide its judgment policy across a pile of moving parts. If behavior changes, the policy file changed.
+- a policy hash
+- a holdout score
+- a baseline market score
+- a promotion or rejection decision
 
-### 2. Reality Is The Evaluator
-Every iteration gets pulled back to resolved Kalshi outcomes. The system earns the right to keep a change by performing better in backtests.
+Over time, that history answers the only question that matters: is the policy actually getting better at assigning probabilities?
 
-### 3. Edge Should Be Public
-The useful output is not a vague confidence score. It is the live set of places where the engine disagrees with the market and is willing to be measured.
-
-## Conceptual Architecture
+## Repo Shape
 
 ```text
-          historical markets                live markets
-                 |                              |
-                 v                              v
-        +------------------+          +------------------+
-        | backtest runner  |          | forecast runner  |
-        +------------------+          +------------------+
-                 |                              |
-                 +-------------+  +-------------+
-                               v  v
-                         +-------------+
-                         | policy file |
-                         +-------------+
-                               |
-                               v
-                     +---------------------+
-                     | policy editor loop  |
-                     +---------------------+
-                               |
-                               v
-                     +---------------------+
-                     | published edge feed |
-                     +---------------------+
+policy/current.md          # only mutable forecasting policy
+src/                       # frozen harness code
+artifacts/cache/           # synced Kalshi data
+artifacts/ledgers/         # append-only experiment + live ledgers
+artifacts/policies/        # archived policy versions by content hash
+artifacts/reports/         # generated markdown + SVG outputs
+artifacts/splits/          # frozen split manifest
 ```
 
-## In One Sentence
+## Runtime
 
-> `autoedge` is a forecasting engine that continuously rewrites a single policy, proves those edits against resolved markets, and exposes its live edge where it disagrees with Kalshi.
+The forecasting and revision steps run through a local agent CLI, not direct model API calls.
 
-## North Star
+Supported runners:
 
-Build a forecasting system that can answer three questions at any point in time:
+- `codex`
+- `claude`
 
-1. What policy produced this forecast?
-2. Did that policy actually work on resolved markets?
-3. Where does it currently disagree with the market enough to matter?
+Default behavior is `AUTOEDGE_AGENT_CLI=auto`, which prefers `codex` when available and otherwise falls back to `claude`.
+
+Useful environment variables:
+
+```bash
+AUTOEDGE_AGENT_CLI=auto
+AUTOEDGE_AGENT_MODEL=
+AUTOEDGE_AGENT_REVISION_MODEL=
+AUTOEDGE_AGENT_TIMEOUT_MS=120000
+AUTOEDGE_FORECAST_CONCURRENCY=1
+KALSHI_BASE_URL=https://api.elections.kalshi.com/trade-api/v2
+KALSHI_EXTRA_HEADERS_JSON={}
+```
+
+## Commands
+
+```bash
+npm install
+npm run sync
+npm run backtest -- --split holdout
+npm run improve
+npm run publish
+npm run report
+```
+
+What each command does:
+
+- `sync`: fetches resolved and open Kalshi markets, normalizes them, and freezes the split manifest on first run
+- `backtest`: evaluates the active policy on `train`, `holdout`, or `all`
+- `improve`: lets a local agent propose one replacement policy and promotes it only if holdout log loss strictly improves
+- `publish`: scores current open markets and appends live disagreement predictions
+- `report`: regenerates experiment-history Markdown, live Markdown, and the SVG trend chart
+
+## Evaluation Rules
+
+- Historical truth source: resolved binary Kalshi markets
+- One historical example per market: latest 60-minute candlestick ending at or before 24 hours before settlement
+- Deciding metric: holdout average log loss
+- Promotion rule: candidate policy must beat the active policy on holdout log loss
+- Live metrics are secondary diagnostics and never decide promotion
+
+## Outputs
+
+The repo always aims to answer three questions:
+
+1. What policy made this prediction?
+2. How did that policy score on resolved markets?
+3. Where does it currently disagree with the market?
+
+Those answers live in generated artifacts:
+
+- `artifacts/ledgers/experiments.jsonl`
+- `artifacts/ledgers/live.jsonl`
+- `artifacts/reports/experiment-history.md`
+- `artifacts/reports/live-disagreements.md`
+- `artifacts/reports/experiment-trend.svg`
+
+## Not In V1
+
+- wallet management
+- order placement
+- routing
+- shadow execution as the optimization target
+- multi-agent orchestration
+
+Future paper trading or live execution can sit on top of the same snapshot and forecast ledgers later, but the v1 repo is intentionally read-only.

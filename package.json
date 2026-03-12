@@ -1,0 +1,26 @@
+{
+  "name": "autoedge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "autoedge": "tsx src/cli.ts",
+    "sync": "tsx src/cli.ts sync",
+    "backtest": "tsx src/cli.ts backtest",
+    "improve": "tsx src/cli.ts improve",
+    "publish": "tsx src/cli.ts publish",
+    "report": "tsx src/cli.ts report"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
