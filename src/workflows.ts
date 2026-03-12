@@ -55,7 +55,7 @@ export async function runSync(config: AppConfig, deps: AppDeps): Promise<SyncSum
 
   const manifest = await readSplitManifest(config);
   let splitCreated = false;
-  if (!manifest) {
+  if (!manifest || Object.keys(manifest.assignments).length === 0) {
     await writeSplitManifest(config, buildSplitManifest(resolvedExamples));
     splitCreated = true;
   }

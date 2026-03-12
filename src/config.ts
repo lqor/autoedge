@@ -67,7 +67,7 @@ export function loadConfig(rootDir = process.cwd()): AppConfig {
     agentRevisionModel: process.env.AUTOEDGE_AGENT_REVISION_MODEL ?? process.env.AUTOEDGE_AGENT_MODEL,
     agentTimeoutMs: parsePositiveInt(process.env.AUTOEDGE_AGENT_TIMEOUT_MS, 120000),
     forecastConcurrency: parsePositiveInt(process.env.AUTOEDGE_FORECAST_CONCURRENCY, 1),
-    syncConcurrency: parsePositiveInt(process.env.AUTOEDGE_SYNC_CONCURRENCY, 4),
+    syncConcurrency: parsePositiveInt(process.env.AUTOEDGE_SYNC_CONCURRENCY, 1),
     resolvedMarketLimit: parsePositiveInt(process.env.AUTOEDGE_RESOLVED_LIMIT, 200),
     openMarketLimit: parsePositiveInt(process.env.AUTOEDGE_OPEN_LIMIT, 100),
     publishMinDelta: parseProbability(process.env.AUTOEDGE_PUBLISH_MIN_DELTA, 0.1),

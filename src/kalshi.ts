@@ -33,6 +33,7 @@ interface NormalizedMarketMeta {
   liquidity: number | null;
   openInterest: number | null;
   closeTime?: string;
+  openTime?: string;
   resolveTime?: string;
   settlementTime?: string;
   outcome: BinaryOutcome | null;
@@ -43,6 +44,7 @@ interface NormalizedCandle {
   endTime: string;
   probability: number;
   volume: number | null;
+  openInterest: number | null;
 }
 
 export class KalshiClient {
@@ -56,9 +58,22 @@ export class KalshiClient {
       const response = (await this.http.getJson(this.buildLiveUrl("/historical/cutoff"))) as {
         cutoff_ts?: unknown;
         cutoff?: unknown;
+        market_settled_ts?: unknown;
+        orders_updated_ts?: unknown;
+        trades_created_ts?: unknown;
       };
 
-      return toIso(firstDefined(response.cutoff_ts, response.cutoff)) ?? null;
+      return (
+        toIso(
+          firstDefined(
+            response.market_settled_ts,
+            response.cutoff_ts,
+            response.cutoff,
+            response.orders_updated_ts,
+            response.trades_created_ts,
+          ),
+        ) ?? null
+      );
     } catch {
       return null;
     }
@@ -105,22 +120,24 @@ export class KalshiClient {
   }
 
   async fetchResolvedExamples(cutoffIso: string | null): Promise<ResolvedExample[]> {
+    const rawLimit = Math.min(this.config.resolvedMarketLimit * 10, 1000);
     const historicalMarkets =
       (await this.fetchMarkets("/historical/markets", {
         status: "settled",
-        limit: this.config.resolvedMarketLimit,
+        limit: rawLimit,
       })) ||
-      (await this.fetchMarkets("/historical/markets", { limit: this.config.resolvedMarketLimit })) ||
+      (await this.fetchMarkets("/historical/markets", { limit: rawLimit })) ||
       [];
     const recentMarkets =
-      (await this.fetchMarkets("/markets", { status: "settled", limit: this.config.resolvedMarketLimit })) ||
-      (await this.fetchMarkets("/markets", { limit: this.config.resolvedMarketLimit })) ||
+      (await this.fetchMarkets("/markets", { status: "settled", limit: rawLimit })) ||
+      (await this.fetchMarkets("/markets", { limit: rawLimit })) ||
       [];
 
     const merged = dedupeByTicker([...historicalMarkets, ...recentMarkets])
       .map((record) => normalizeMarketMeta(record))
       .filter((meta): meta is NormalizedMarketMeta => Boolean(meta?.isBinary && meta.outcome !== null))
-      .filter((meta) => Boolean(meta.settlementTime));
+      .filter((meta) => Boolean(meta.settlementTime))
+      .filter((meta) => hasPossible24HourSnapshot(meta));
 
     const examples = await mapConcurrent<NormalizedMarketMeta, ResolvedExample | null>(
       merged,
@@ -167,7 +184,8 @@ export class KalshiClient {
       .sort(
         (left, right) =>
           new Date(left.settlementTime).valueOf() - new Date(right.settlementTime).valueOf(),
-      );
+      )
+      .slice(0, this.config.resolvedMarketLimit);
   }
 
   private async fetchMarkets(
@@ -211,9 +229,16 @@ export class KalshiClient {
       ? `/series/${market.seriesTicker}/markets/${market.ticker}/candlesticks`
       : `/markets/${market.ticker}/candlesticks`;
     const endpoint = historical ? `/historical/markets/${market.ticker}/candlesticks` : livePath;
+    const settlementEpoch = Math.floor(new Date(market.settlementTime ?? market.resolveTime ?? market.closeTime ?? new Date().toISOString()).valueOf() / 1000);
+    const startTs = settlementEpoch - 14 * 24 * 60 * 60;
 
     const response = (await this.http.getJson(
-      this.buildLiveUrl(endpoint, { period_interval: 60 }),
+      this.buildLiveUrl(endpoint, {
+        start_ts: startTs,
+        end_ts: settlementEpoch,
+        period_interval: 60,
+        include_latest_before_start: "true",
+      }),
     )) as { candlesticks?: unknown[]; candles?: unknown[] };
 
     const candles = firstDefined(response.candlesticks, response.candles) ?? [];
@@ -265,17 +290,26 @@ export function normalizeMarketMeta(record: unknown): NormalizedMarketMeta | nul
     category: stringifyOptional(firstDefined(raw.category, raw.market_category, raw.series_category)),
     status: stringifyOptional(firstDefined(raw.status, raw.market_status)),
     marketProbability: deriveMarketProbability(raw),
-    yesBid: coercePrice(firstDefined(raw.yes_bid, raw.best_yes_bid, raw.bid)),
-    yesAsk: coercePrice(firstDefined(raw.yes_ask, raw.best_yes_ask, raw.ask)),
-    noBid: coercePrice(firstDefined(raw.no_bid, raw.best_no_bid)),
-    noAsk: coercePrice(firstDefined(raw.no_ask, raw.best_no_ask)),
-    lastPrice: coercePrice(firstDefined(raw.last_price, raw.last_traded_price, raw.price)),
-    volume: parseOptionalNumber(firstDefined(raw.volume, raw.trade_volume, raw.total_volume)),
-    liquidity: parseOptionalNumber(firstDefined(raw.liquidity, raw.open_interest_dollars)),
-    openInterest: parseOptionalNumber(firstDefined(raw.open_interest, raw.position)),
+    yesBid: coercePrice(firstDefined(raw.yes_bid_dollars, raw.yes_bid, raw.best_yes_bid, raw.bid)),
+    yesAsk: coercePrice(firstDefined(raw.yes_ask_dollars, raw.yes_ask, raw.best_yes_ask, raw.ask)),
+    noBid: coercePrice(firstDefined(raw.no_bid_dollars, raw.no_bid, raw.best_no_bid)),
+    noAsk: coercePrice(firstDefined(raw.no_ask_dollars, raw.no_ask, raw.best_no_ask)),
+    lastPrice: coercePrice(firstDefined(raw.last_price_dollars, raw.last_price, raw.last_traded_price, raw.price)),
+    volume: parseOptionalNumber(firstDefined(raw.volume_fp, raw.volume, raw.trade_volume, raw.total_volume)),
+    liquidity: parseOptionalNumber(firstDefined(raw.liquidity_dollars, raw.liquidity, raw.open_interest_dollars)),
+    openInterest: parseOptionalNumber(firstDefined(raw.open_interest_fp, raw.open_interest, raw.position)),
     closeTime: toIso(firstDefined(raw.close_time, raw.close_ts, raw.expiration_time, raw.end_date)),
+    openTime: toIso(firstDefined(raw.open_time, raw.created_time)),
     resolveTime: toIso(firstDefined(raw.settlement_time, raw.resolve_time, raw.resolution_time, raw.expiration_time)),
-    settlementTime: toIso(firstDefined(raw.settlement_time, raw.resolve_time, raw.resolution_time, raw.close_time)),
+    settlementTime: toIso(
+      firstDefined(
+        raw.settlement_time,
+        raw.settlement_ts,
+        raw.resolve_time,
+        raw.resolution_time,
+        raw.close_time,
+      ),
+    ),
     outcome,
     isBinary,
   };
@@ -305,7 +339,25 @@ export function normalizeCandle(value: unknown): NormalizedCandle | null {
 
   const raw = value as Record<string, unknown>;
   const endTime = toIso(firstDefined(raw.end_period_ts, raw.end_ts, raw.period_end_ts, raw.time));
-  const probability = deriveMarketProbability(raw, ["close", "last_price", "price", "yes_price"]);
+  const priceNode = asRecord(raw.price);
+  const yesBidNode = asRecord(raw.yes_bid);
+  const yesAskNode = asRecord(raw.yes_ask);
+  const probability = deriveMarketProbability(raw, [
+    "close_dollars",
+    "close",
+    "last_price_dollars",
+    "last_price",
+    "price",
+    "yes_price",
+  ]) ??
+    deriveMarketProbability(
+      {
+        close_dollars: firstDefined(priceNode?.close_dollars, priceNode?.close),
+        yes_bid_dollars: firstDefined(yesBidNode?.close_dollars, yesBidNode?.close),
+        yes_ask_dollars: firstDefined(yesAskNode?.close_dollars, yesAskNode?.close),
+      },
+      ["close_dollars", "close"],
+    );
 
   if (!endTime || probability === null) {
     return null;
@@ -314,7 +366,8 @@ export function normalizeCandle(value: unknown): NormalizedCandle | null {
   return {
     endTime,
     probability,
-    volume: parseOptionalNumber(firstDefined(raw.volume, raw.trade_volume)),
+    volume: parseOptionalNumber(firstDefined(raw.volume_fp, raw.volume, raw.trade_volume)),
+    openInterest: parseOptionalNumber(firstDefined(raw.open_interest_fp, raw.open_interest)),
   };
 }
 
@@ -339,19 +392,25 @@ function deriveMarketProbability(
     }
   }
 
-  const yesBid = coercePrice(firstDefined(raw.yes_bid, raw.best_yes_bid, raw.bid));
-  const yesAsk = coercePrice(firstDefined(raw.yes_ask, raw.best_yes_ask, raw.ask));
+  const yesBid = coercePrice(firstDefined(raw.yes_bid_dollars, raw.yes_bid, raw.best_yes_bid, raw.bid));
+  const yesAsk = coercePrice(firstDefined(raw.yes_ask_dollars, raw.yes_ask, raw.best_yes_ask, raw.ask));
   if (yesBid !== null && yesAsk !== null) {
     return roundToSix((yesBid + yesAsk) / 2);
   }
 
-  const noBid = coercePrice(firstDefined(raw.no_bid, raw.best_no_bid));
-  const noAsk = coercePrice(firstDefined(raw.no_ask, raw.best_no_ask));
+  const noBid = coercePrice(firstDefined(raw.no_bid_dollars, raw.no_bid, raw.best_no_bid));
+  const noAsk = coercePrice(firstDefined(raw.no_ask_dollars, raw.no_ask, raw.best_no_ask));
   if (noBid !== null && noAsk !== null) {
     return roundToSix(1 - (noBid + noAsk) / 2);
   }
 
   return null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function shouldUseHistoricalEndpoint(settlementTimeIso: string, cutoffIso: string | null): boolean {
@@ -360,6 +419,20 @@ function shouldUseHistoricalEndpoint(settlementTimeIso: string, cutoffIso: strin
   }
 
   return new Date(settlementTimeIso).valueOf() <= new Date(cutoffIso).valueOf();
+}
+
+function hasPossible24HourSnapshot(market: NormalizedMarketMeta): boolean {
+  if (!market.settlementTime) {
+    return false;
+  }
+
+  if (!market.openTime) {
+    return true;
+  }
+
+  const openTime = new Date(market.openTime).valueOf();
+  const target = new Date(market.settlementTime).valueOf() - 24 * 60 * 60 * 1000;
+  return openTime <= target;
 }
 
 function dedupeByTicker(records: unknown[]): unknown[] {
@@ -395,20 +468,35 @@ function stringifyOptional(value: unknown): string | undefined {
 export function createDefaultHttpClient(extraHeaders: Record<string, string> = {}): HttpClient {
   return {
     async getJson(url, init) {
-      const response = await fetch(url, {
-        ...init,
-        headers: {
-          Accept: "application/json",
-          ...extraHeaders,
-          ...(init?.headers ?? {}),
-        },
-      });
+      const maxAttempts = 4;
 
-      if (!response.ok) {
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const response = await fetch(url, {
+          ...init,
+          headers: {
+            Accept: "application/json",
+            ...extraHeaders,
+            ...(init?.headers ?? {}),
+          },
+        });
+
+        if (response.ok) {
+          return response.json();
+        }
+
+        if ((response.status === 429 || response.status >= 500) && attempt < maxAttempts) {
+          await sleep(500 * 2 ** (attempt - 1));
+          continue;
+        }
+
         throw new Error(`GET ${url} failed: ${response.status} ${response.statusText}`);
       }
 
-      return response.json();
+      throw new Error(`GET ${url} failed after ${maxAttempts} attempts`);
     },
   };
+}
+
+async function sleep(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

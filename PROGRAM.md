@@ -46,6 +46,35 @@ These parts of the repo are fixed code and should not be rewritten by the improv
 
 The forecasting policy in [`policy/current.md`](/Users/igorkudryk/Side%20Coding/autoedge/policy/current.md) is the only mutable repo-tracked artifact in the learning loop.
 
+## Frozen Modules
+
+The fixed harness currently lives in explicit modules:
+
+- `src/cli.ts`: command surface for `sync`, `backtest`, `improve`, `publish`, and `report`
+- `src/workflows.ts`: orchestration for the full historical and live loop
+- `src/kalshi.ts`: Kalshi market normalization and 24-hour snapshot extraction
+- `src/agent.ts`: local `codex` or `claude` runner for forecasting and policy revision
+- `src/scoring.ts`: log-loss scoring and training-error summaries
+- `src/splits.ts`: chronological train/holdout manifest generation
+- `src/storage.ts`: cache, ledgers, report files, and policy archive persistence
+- `src/report.ts`: Markdown and SVG report generation
+- `test/kalshi.test.ts`, `test/scoring.test.ts`, and `test/workflows.test.ts`: regression coverage for the frozen evaluator
+
+## Concrete Artifacts
+
+The harness now writes concrete cache and ledger files, not just directories:
+
+- `artifacts/cache/historical-cutoff.json`
+- `artifacts/cache/resolved-examples.json`
+- `artifacts/cache/open-markets.json`
+- `artifacts/splits/resolved-split.json`
+- `artifacts/ledgers/experiments.jsonl`
+- `artifacts/ledgers/live.jsonl`
+- `artifacts/ledgers/policies.jsonl`
+- `artifacts/reports/experiment-history.md`
+- `artifacts/reports/live-disagreements.md`
+- `artifacts/reports/experiment-trend.svg`
+
 ## Historical And Live Modes
 
 Historical mode is the truth source.
@@ -59,6 +88,7 @@ Live mode is read-only.
 - It scans open binary markets.
 - It compares the active policy estimate to the current market probability.
 - It publishes the strongest disagreements into an append-only ledger plus generated Markdown.
+- It backfills resolution events later when a previously published market settles.
 - It never places orders, manages a wallet, routes execution, or touches capital.
 
 ## Improvement Rules
@@ -84,10 +114,11 @@ The improvement loop may not:
 The intended first local run is:
 
 1. `npm run sync`
-2. `npm run backtest -- --split holdout`
-3. `npm run improve`
-4. `npm run publish`
-5. `npm run report`
+2. `npm test`
+3. `npm run backtest -- --split holdout`
+4. `npm run improve`
+5. `npm run publish`
+6. `npm run report`
 
 This sequence should always answer three questions:
 
