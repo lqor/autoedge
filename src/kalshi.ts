@@ -3,7 +3,6 @@ import type { BinaryOutcome, MarketSnapshot, ResolvedExample } from "./types.js"
 import {
   coercePrice,
   firstDefined,
-  mapConcurrent,
   parseOptionalNumber,
   roundToSix,
   toIso,
@@ -38,6 +37,7 @@ interface NormalizedMarketMeta {
   settlementTime?: string;
   outcome: BinaryOutcome | null;
   isBinary: boolean;
+  listingSource?: "historical" | "live";
 }
 
 interface NormalizedCandle {
@@ -120,38 +120,56 @@ export class KalshiClient {
   }
 
   async fetchResolvedExamples(cutoffIso: string | null): Promise<ResolvedExample[]> {
-    const rawLimit = Math.min(this.config.resolvedMarketLimit * 10, 1000);
-    const historicalMarkets =
-      (await this.fetchMarkets("/historical/markets", {
-        status: "settled",
-        limit: rawLimit,
-      })) ||
-      (await this.fetchMarkets("/historical/markets", { limit: rawLimit })) ||
-      [];
-    const recentMarkets =
-      (await this.fetchMarkets("/markets", { status: "settled", limit: rawLimit })) ||
-      (await this.fetchMarkets("/markets", { limit: rawLimit })) ||
-      [];
+    const targetExamples = this.config.resolvedMarketLimit;
+    const candidateTarget = Math.max(Math.ceil(targetExamples * 1.5), 100);
+    const historicalCandidates = await this.collectResolvedCandidates({
+      path: "/historical/markets",
+      listingSource: "historical",
+      targetCount: candidateTarget,
+      predicate: () => true,
+    });
+    const recentCandidates =
+      historicalCandidates.length >= targetExamples
+        ? []
+        : await this.collectResolvedCandidates({
+            path: "/markets",
+            listingSource: "live",
+            targetCount: Math.max(targetExamples, 50),
+            predicate: (meta) =>
+              Boolean(meta.settlementTime) &&
+              !shouldUseHistoricalEndpoint(meta.settlementTime!, cutoffIso),
+          });
 
-    const merged = dedupeByTicker([...historicalMarkets, ...recentMarkets])
-      .map((record) => normalizeMarketMeta(record))
-      .filter((meta): meta is NormalizedMarketMeta => Boolean(meta?.isBinary && meta.outcome !== null))
-      .filter((meta) => Boolean(meta.settlementTime))
-      .filter((meta) => hasPossible24HourSnapshot(meta));
+    const candidates = dedupeByTicker(
+      [...historicalCandidates, ...recentCandidates].map((candidate) => ({
+        ...candidate,
+        ticker: candidate.ticker,
+      })),
+    )
+      .map((record) => record as NormalizedMarketMeta)
+      .sort(
+        (left, right) =>
+          new Date(left.settlementTime ?? 0).valueOf() - new Date(right.settlementTime ?? 0).valueOf(),
+      );
 
-    const examples = await mapConcurrent<NormalizedMarketMeta, ResolvedExample | null>(
-      merged,
-      this.config.syncConcurrency,
-      async (meta) => {
-      const useHistoricalEndpoint = shouldUseHistoricalEndpoint(meta.settlementTime!, cutoffIso);
+    const examples: ResolvedExample[] = [];
+
+    for (const meta of candidates) {
+      if (examples.length >= targetExamples) {
+        break;
+      }
+
+      const useHistoricalEndpoint =
+        meta.listingSource === "historical" ||
+        shouldUseHistoricalEndpoint(meta.settlementTime!, cutoffIso);
       const candles = await this.fetchCandles(meta, useHistoricalEndpoint);
       const snapshot = selectSnapshotFromCandles(candles, meta.settlementTime!, 24);
 
       if (!snapshot) {
-        return null;
+        continue;
       }
 
-      return {
+      examples.push({
         marketId: meta.marketId,
         ticker: meta.ticker,
         ...(meta.seriesTicker ? { seriesTicker: meta.seriesTicker } : {}),
@@ -171,21 +189,17 @@ export class KalshiClient {
         lastPrice: snapshot.probability,
         volume: snapshot.volume,
         liquidity: meta.liquidity,
-        openInterest: meta.openInterest,
+        openInterest: firstDefined(snapshot.openInterest, meta.openInterest) ?? null,
         rawSource: useHistoricalEndpoint ? "historical" : "live",
         outcome: meta.outcome!,
         settlementTime: meta.settlementTime!,
-      } satisfies ResolvedExample;
-      },
-    );
+      });
+    }
 
-    return examples
-      .filter((example): example is ResolvedExample => Boolean(example))
-      .sort(
-        (left, right) =>
-          new Date(left.settlementTime).valueOf() - new Date(right.settlementTime).valueOf(),
-      )
-      .slice(0, this.config.resolvedMarketLimit);
+    return examples.sort(
+      (left, right) =>
+        new Date(left.settlementTime).valueOf() - new Date(right.settlementTime).valueOf(),
+    );
   }
 
   private async fetchMarkets(
@@ -221,6 +235,74 @@ export class KalshiClient {
     return results.length > 0 ? results : null;
   }
 
+  private async collectResolvedCandidates(args: {
+    path: string;
+    listingSource: "historical" | "live";
+    targetCount: number;
+    predicate: (meta: NormalizedMarketMeta) => boolean;
+  }): Promise<NormalizedMarketMeta[]> {
+    const candidates: NormalizedMarketMeta[] = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    const maxPages = 50;
+
+    for (let pageIndex = 0; pageIndex < maxPages && candidates.length < args.targetCount; pageIndex += 1) {
+      const page = await this.fetchMarketsPage(args.path, {
+        status: "settled",
+        limit: 100,
+        cursor,
+      });
+
+      for (const record of page.markets) {
+        const meta = normalizeMarketMeta(record);
+        if (!meta || seen.has(meta.ticker)) {
+          continue;
+        }
+
+        if (!meta.isBinary || meta.outcome === null || !meta.settlementTime || !hasPossible24HourSnapshot(meta)) {
+          continue;
+        }
+
+        if (!args.predicate(meta)) {
+          continue;
+        }
+
+        seen.add(meta.ticker);
+        candidates.push({
+          ...meta,
+          listingSource: args.listingSource,
+        });
+
+        if (candidates.length >= args.targetCount) {
+          break;
+        }
+      }
+
+      if (!page.cursor || page.markets.length === 0) {
+        break;
+      }
+
+      cursor = page.cursor;
+    }
+
+    return candidates;
+  }
+
+  private async fetchMarketsPage(
+    path: string,
+    query: Record<string, string | number | undefined>,
+  ): Promise<{ markets: unknown[]; cursor?: string | null }> {
+    const page = (await this.http.getJson(this.buildLiveUrl(path, query))) as {
+      markets?: unknown[];
+      cursor?: string | null;
+    };
+
+    return {
+      markets: page.markets ?? [],
+      cursor: page.cursor,
+    };
+  }
+
   private async fetchCandles(
     market: NormalizedMarketMeta,
     historical: boolean,
@@ -232,14 +314,34 @@ export class KalshiClient {
     const settlementEpoch = Math.floor(new Date(market.settlementTime ?? market.resolveTime ?? market.closeTime ?? new Date().toISOString()).valueOf() / 1000);
     const startTs = settlementEpoch - 14 * 24 * 60 * 60;
 
-    const response = (await this.http.getJson(
-      this.buildLiveUrl(endpoint, {
-        start_ts: startTs,
-        end_ts: settlementEpoch,
-        period_interval: 60,
-        include_latest_before_start: "true",
-      }),
-    )) as { candlesticks?: unknown[]; candles?: unknown[] };
+    const query = {
+      start_ts: startTs,
+      end_ts: settlementEpoch,
+      period_interval: 60,
+      include_latest_before_start: "true",
+    };
+    const endpoints = historical || !market.seriesTicker ? [endpoint] : [endpoint, `/markets/${market.ticker}/candlesticks`];
+    let response: { candlesticks?: unknown[]; candles?: unknown[] } | null = null;
+
+    for (const candidateEndpoint of endpoints) {
+      try {
+        response = (await this.http.getJson(this.buildLiveUrl(candidateEndpoint, query))) as {
+          candlesticks?: unknown[];
+          candles?: unknown[];
+        };
+        break;
+      } catch (error) {
+        if (isHttpStatusError(error, 404) || isHttpStatusError(error, 400)) {
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    if (!response) {
+      return [];
+    }
 
     const candles = firstDefined(response.candlesticks, response.candles) ?? [];
 
@@ -463,6 +565,10 @@ function stringifyOptional(value: unknown): string | undefined {
 
   const text = String(value).trim();
   return text ? text : undefined;
+}
+
+function isHttpStatusError(error: unknown, status: number): boolean {
+  return error instanceof Error && error.message.includes(`failed: ${status} `);
 }
 
 export function createDefaultHttpClient(extraHeaders: Record<string, string> = {}): HttpClient {

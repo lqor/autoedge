@@ -55,7 +55,7 @@ export async function runSync(config: AppConfig, deps: AppDeps): Promise<SyncSum
 
   const manifest = await readSplitManifest(config);
   let splitCreated = false;
-  if (!manifest || Object.keys(manifest.assignments).length === 0) {
+  if (!manifest || !manifestMatchesExamples(manifest, resolvedExamples)) {
     await writeSplitManifest(config, buildSplitManifest(resolvedExamples));
     splitCreated = true;
   }
@@ -485,6 +485,17 @@ function buildResolutionEvents(
 
 function logLossFromEvent(probability: number, outcome: 0 | 1): number {
   return roundToSix(outcome === 1 ? -Math.log(Math.max(1e-6, probability)) : -Math.log(Math.max(1e-6, 1 - probability)));
+}
+
+function manifestMatchesExamples(
+  manifest: { assignments: Record<string, Split> },
+  examples: ResolvedExample[],
+): boolean {
+  if (Object.keys(manifest.assignments).length !== examples.length) {
+    return false;
+  }
+
+  return examples.every((example) => Boolean(manifest.assignments[example.marketId]));
 }
 
 export function formatEvaluationSummary(summary: EvaluationSummary): string {

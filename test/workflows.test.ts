@@ -10,6 +10,7 @@ import {
   ensureProjectLayout,
   readExperimentRuns,
   readLiveEvents,
+  readSplitManifest,
   writeActivePolicy,
   writeResolvedExamples,
   writeSplitManifest,
@@ -17,7 +18,7 @@ import {
 import type {
   AppDeps,
 } from "../src/workflows.js";
-import { materializeLiveEvents, runImprove, runPublish } from "../src/workflows.js";
+import { materializeLiveEvents, runImprove, runPublish, runSync } from "../src/workflows.js";
 import type { MarketSnapshot, ResolvedExample, SplitManifest } from "../src/types.js";
 
 describe("workflows", () => {
@@ -200,6 +201,75 @@ describe("workflows", () => {
     const liveReport = await fs.readFile(config.liveReportFile, "utf8");
     expect(liveReport).toContain("OPEN");
     expect(liveReport).toContain("RESOLVED");
+  });
+
+  it("rebuilds the split manifest when the resolved example universe changes", async () => {
+    const config = loadConfig(rootDir);
+    await ensureProjectLayout(config);
+
+    const oldExample = buildResolvedExample({
+      marketId: "old-1",
+      ticker: "OLD1",
+      title: "Old one",
+      marketProbability: 0.4,
+      outcome: 1,
+      settlementTime: "2026-01-01T00:00:00.000Z",
+    });
+    const newExamples = [
+      buildResolvedExample({
+        marketId: "new-1",
+        ticker: "NEW1",
+        title: "New one",
+        marketProbability: 0.3,
+        outcome: 0,
+        settlementTime: "2026-01-01T00:00:00.000Z",
+      }),
+      buildResolvedExample({
+        marketId: "new-2",
+        ticker: "NEW2",
+        title: "New two",
+        marketProbability: 0.6,
+        outcome: 1,
+        settlementTime: "2026-02-01T00:00:00.000Z",
+      }),
+    ];
+
+    await writeResolvedExamples(config, [oldExample]);
+    await writeSplitManifest(config, {
+      createdAt: new Date().toISOString(),
+      assignments: { "old-1": "train" },
+    });
+
+    const deps: AppDeps = {
+      kalshi: {
+        async getHistoricalCutoff() {
+          return "2025-03-12T00:00:00.000Z";
+        },
+        async fetchOpenSnapshots() {
+          return [];
+        },
+        async fetchResolvedExamples() {
+          return newExamples;
+        },
+      },
+      agent: {
+        async forecast() {
+          throw new Error("not used");
+        },
+        async revisePolicy() {
+          throw new Error("not used");
+        },
+      },
+    };
+
+    const summary = await runSync(config, deps);
+    const manifest = await readSplitManifest(config);
+
+    expect(summary.splitCreated).toBe(true);
+    expect(manifest).not.toBeNull();
+    expect(manifest?.assignments["new-1"]).toBeDefined();
+    expect(manifest?.assignments["new-2"]).toBeDefined();
+    expect(manifest?.assignments["old-1"]).toBeUndefined();
   });
 });
 
